@@ -1,0 +1,1244 @@
+From 70fe308e72baef9c69ea53286a05f126a3fcf420 Mon Sep 17 00:00:00 2001
+From: epuzanov <epuzanov@users.noreply.github.com>
+Date: Tue, 1 Oct 2024 11:12:00 +0200
+Subject: [PATCH 1/5] initial EGL support
+
+---
+ CMakeLists.txt                    |  19 +-
+ aclocal.m4                        |  28 ++
+ build/msvc10/src/config-debug.h   |   3 +
+ build/msvc10/src/config-release.h |   3 +
+ build/msvc6/src/config-debug.h    |   3 +
+ build/msvc6/src/config-release.h  |   3 +
+ build/msvc7/src/config-debug.h    |   3 +
+ build/msvc7/src/config-release.h  |   3 +
+ build/msvc8/src/config-debug.h    |   3 +
+ build/msvc8/src/config-release.h  |   3 +
+ build/msvc9/src/config-debug.h    |   3 +
+ build/msvc9/src/config-release.h  |   3 +
+ src/config.h.cmake.in             |   3 +
+ src/config.h.in                   |   3 +
+ src/glue/CMakeLists.txt           |   3 +
+ src/glue/Makefile.am              |   3 +-
+ src/glue/Makefile.in              |  32 ++-
+ src/glue/gl.cpp                   |  41 ++-
+ src/glue/gl_egl.cpp               | 422 ++++++++++++++++++++++++++++++
+ src/glue/gl_egl.h                 |  63 +++++
+ 20 files changed, 627 insertions(+), 20 deletions(-)
+ create mode 100644 src/glue/gl_egl.cpp
+ create mode 100644 src/glue/gl_egl.h
+
+Index: coin3/CMakeLists.txt
+===================================================================
+--- coin3.orig/CMakeLists.txt
++++ coin3/CMakeLists.txt
+@@ -110,6 +110,8 @@ cmake_dependent_option(COIN_BUILD_MAC_FR
+ cmake_dependent_option(COIN_BUILD_MAC_X11 "Build for X11 on Mac OS X when ON. Default is OFF." OFF "APPLE" OFF)
+ cmake_dependent_option(COIN_BUILD_MAC_AGL "Build for AGL on Mac OS X when ON. Default is OFF." OFF "APPLE" OFF)
+ 
++option(COIN_BUILD_EGL "Build for EGL on Linux when ON. Default is OFF." OFF)
++
+ check_include_file_cxx(thread HAVE_STD_THREAD)
+ cmake_dependent_option(COIN_DEBUG_CHECK_THREAD "Enable thread check in several central Coin functions." OFF "HAVE_STD_THREAD" OFF)
+ 
+@@ -121,6 +123,7 @@ report_prepare(
+   COIN_BUILD_DOCUMENTATION_MAN
+   COIN_BUILD_DOCUMENTATION_QTHELP
+   COIN_BUILD_DOCUMENTATION_CHM
++  COIN_BUILD_EGL
+   COIN_BUILD_AWESOME_DOCUMENTATION
+   COIN_THREADSAFE
+   HAVE_VRML97
+@@ -208,7 +211,7 @@ if(COIN_BUILD_MAC_X11)
+     list(APPEND COIN_TARGET_LINK_LIBRARIES ${X11_LIBRARIES} ${X11_GL_LIB} ${X11_GLU_LIB})
+   endif()
+ else()
+-  if(UNIX AND NOT APPLE)
++  if(UNIX AND NOT APPLE AND NOT COIN_BUILD_EGL)
+     find_package(X11 REQUIRED)
+     list(APPEND COIN_TARGET_INCLUDE_DIRECTORIES ${X11_INCLUDE_DIR})
+     list(APPEND COIN_TARGET_LINK_LIBRARIES ${X11_LIBRARIES})
+@@ -217,8 +220,14 @@ else()
+   if(OPENGL_FOUND)
+     set(HAVE_OPENGL 1)
+     set(OPENGL_SYSTEM_LIBRARY_NAME "${OPENGL_gl_LIBRARY}${CMAKE_SHARED_LIBRARY_SUFFIX}")
+-    if(OpenGL_GLU_FOUND)
+-      set(HAVE_GLU 1)
++    if(COIN_BUILD_EGL AND OpenGL_EGL_FOUND)
++      set(HAVE_EGL 1)
++      if (NOT TARGET OpenGL::EGL)
++        list(APPEND COIN_TARGET_INCLUDE_DIRECTORIES ${OPENGL_EGL_INCLUDE_DIR})
++        list(APPEND COIN_TARGET_LINK_LIBRARIES ${OPENGL_egl_LIBRARY})
++      else()
++        list(APPEND COIN_TARGET_LINK_LIBRARIES OpenGL::EGL)
++      endif()
+     endif()
+     if(APPLE)
+       set(GLU_IS_PART_OF_GL 1)
+@@ -226,9 +235,18 @@ else()
+     #include_directories("${OPENGL_INCLUDE_DIR}")
+     if (NOT TARGET OpenGL::GL)
+       list(APPEND COIN_TARGET_INCLUDE_DIRECTORIES ${OPENGL_INCLUDE_DIR})
+-      list(APPEND COIN_TARGET_LINK_LIBRARIES ${OPENGL_gl_LIBRARY} ${OPENGL_glu_LIBRARY})
++      list(APPEND COIN_TARGET_LINK_LIBRARIES ${OPENGL_gl_LIBRARY})
+     else()
+-      list(APPEND COIN_TARGET_LINK_LIBRARIES OpenGL::GL OpenGL::GLU)
++      list(APPEND COIN_TARGET_LINK_LIBRARIES OpenGL::GL)
++    endif()
++    if(OpenGL_GLU_FOUND AND NOT COIN_BUILD_EGL)
++      set(HAVE_GLU 1)
++      if (NOT TARGET OpenGL::GLU)
++        list(APPEND COIN_TARGET_INCLUDE_DIRECTORIES ${OPENGL_INCLUDE_DIR})
++        list(APPEND COIN_TARGET_LINK_LIBRARIES ${OPENGL_glu_LIBRARY})
++      else()
++        list(APPEND COIN_TARGET_LINK_LIBRARIES OpenGL::GLU)
++      endif()
+     endif()
+   endif()
+ endif()
+@@ -680,7 +698,7 @@ elseif(APPLE)
+   endif()
+ endif()
+ 
+-if(NOT (HAVE_WGL OR HAVE_AGL OR HAVE_CGL OR HAVE_GLX))
++if(NOT (HAVE_WGL OR HAVE_AGL OR HAVE_CGL OR HAVE_GLX OR HAVE_EGL))
+   if (NOT TARGET OpenGL::GLX)
+     if (OPENGL_glx_LIBRARY)
+       list(APPEND COIN_TARGET_LINK_LIBRARIES ${OPENGL_glx_LIBRARY})
+Index: coin3/aclocal.m4
+===================================================================
+--- coin3.orig/aclocal.m4
++++ coin3/aclocal.m4
+@@ -11494,6 +11494,34 @@ else
+ fi
+ ]) # SIM_AC_HAVE_CGL_IFELSE()
+ 
++# **************************************************************************
++# SIM_AC_HAVE_EGL_IFELSE( IF-FOUND, IF-NOT-FOUND )
++#
++# Check whether EGL is on the system.
++
++AC_DEFUN([SIM_AC_HAVE_EGL_IFELSE], [
++sim_ac_save_libs=$LIBS
++sim_ac_egl_libs="-lEGL"
++LIBS="$LIBS $sim_ac_egl_libs"
++
++AC_CACHE_CHECK(
++  [whether EGL is on the system],
++  sim_cv_have_egl,
++  AC_TRY_LINK(
++    [#include <EGL/egl.h>
++     #include <EGL/eglext.h>],
++    [eglGetError();],
++    [sim_cv_have_egl=true],
++    [sim_cv_have_egl=false]))
++
++LIBS="$LIBS $sim_ac_egl_libs"
++if ${sim_cv_have_egl=false}; then
++  ifelse([$1], , :, [$1])
++else
++  ifelse([$2], , :, [$2])
++fi
++]) # SIM_AC_HAVE_EGL_IFELSE()
++
+ # Usage:
+ #  SIM_AC_PACKAGEMAKER_APP([ACTION-IF-FOUND [, ACTION-IF-NOT-FOUND]])
+ #
+Index: coin3/build/msvc10/src/config-debug.h
+===================================================================
+--- coin3.orig/build/msvc10/src/config-debug.h
++++ coin3/build/msvc10/src/config-debug.h
+@@ -124,6 +124,9 @@
+ /* define if you have CGL OpenGL bindings */
+ /* #undef HAVE_CGL */
+ 
++/* define if you have EGL bindings */
++/* #undef HAVE_EGL */
++
+ /* The CPP compiler has a variable containing the current function name */
+ #define HAVE_CPP_COMPILER_FUNCTION_NAME_VAR __FUNCTION__
+ 
+Index: coin3/build/msvc10/src/config-release.h
+===================================================================
+--- coin3.orig/build/msvc10/src/config-release.h
++++ coin3/build/msvc10/src/config-release.h
+@@ -124,6 +124,9 @@
+ /* define if you have CGL OpenGL bindings */
+ /* #undef HAVE_CGL */
+ 
++/* define if you have EGL bindings */
++/* #undef HAVE_EGL */
++
+ /* The CPP compiler has a variable containing the current function name */
+ #define HAVE_CPP_COMPILER_FUNCTION_NAME_VAR __FUNCTION__
+ 
+Index: coin3/build/msvc6/src/config-debug.h
+===================================================================
+--- coin3.orig/build/msvc6/src/config-debug.h
++++ coin3/build/msvc6/src/config-debug.h
+@@ -124,6 +124,9 @@
+ /* define if you have CGL OpenGL bindings */
+ /* #undef HAVE_CGL */
+ 
++/* define if you have EGL bindings */
++/* #undef HAVE_EGL */
++
+ /* The CPP compiler has a variable containing the current function name */
+ /* #undef HAVE_CPP_COMPILER_FUNCTION_NAME_VAR */
+ 
+Index: coin3/build/msvc6/src/config-release.h
+===================================================================
+--- coin3.orig/build/msvc6/src/config-release.h
++++ coin3/build/msvc6/src/config-release.h
+@@ -124,6 +124,9 @@
+ /* define if you have CGL OpenGL bindings */
+ /* #undef HAVE_CGL */
+ 
++/* define if you have EGL bindings */
++/* #undef HAVE_EGL */
++
+ /* The CPP compiler has a variable containing the current function name */
+ /* #undef HAVE_CPP_COMPILER_FUNCTION_NAME_VAR */
+ 
+Index: coin3/build/msvc7/src/config-debug.h
+===================================================================
+--- coin3.orig/build/msvc7/src/config-debug.h
++++ coin3/build/msvc7/src/config-debug.h
+@@ -124,6 +124,9 @@
+ /* define if you have CGL OpenGL bindings */
+ /* #undef HAVE_CGL */
+ 
++/* define if you have EGL bindings */
++/* #undef HAVE_EGL */
++
+ /* The CPP compiler has a variable containing the current function name */
+ #define HAVE_CPP_COMPILER_FUNCTION_NAME_VAR __FUNCTION__
+ 
+Index: coin3/build/msvc7/src/config-release.h
+===================================================================
+--- coin3.orig/build/msvc7/src/config-release.h
++++ coin3/build/msvc7/src/config-release.h
+@@ -124,6 +124,9 @@
+ /* define if you have CGL OpenGL bindings */
+ /* #undef HAVE_CGL */
+ 
++/* define if you have EGL bindings */
++/* #undef HAVE_EGL */
++
+ /* The CPP compiler has a variable containing the current function name */
+ #define HAVE_CPP_COMPILER_FUNCTION_NAME_VAR __FUNCTION__
+ 
+Index: coin3/build/msvc8/src/config-debug.h
+===================================================================
+--- coin3.orig/build/msvc8/src/config-debug.h
++++ coin3/build/msvc8/src/config-debug.h
+@@ -124,6 +124,9 @@
+ /* define if you have CGL OpenGL bindings */
+ /* #undef HAVE_CGL */
+ 
++/* define if you have EGL bindings */
++/* #undef HAVE_EGL */
++
+ /* The CPP compiler has a variable containing the current function name */
+ #define HAVE_CPP_COMPILER_FUNCTION_NAME_VAR __FUNCTION__
+ 
+Index: coin3/build/msvc8/src/config-release.h
+===================================================================
+--- coin3.orig/build/msvc8/src/config-release.h
++++ coin3/build/msvc8/src/config-release.h
+@@ -124,6 +124,9 @@
+ /* define if you have CGL OpenGL bindings */
+ /* #undef HAVE_CGL */
+ 
++/* define if you have EGL bindings */
++/* #undef HAVE_EGL */
++
+ /* The CPP compiler has a variable containing the current function name */
+ #define HAVE_CPP_COMPILER_FUNCTION_NAME_VAR __FUNCTION__
+ 
+Index: coin3/build/msvc9/src/config-debug.h
+===================================================================
+--- coin3.orig/build/msvc9/src/config-debug.h
++++ coin3/build/msvc9/src/config-debug.h
+@@ -124,6 +124,9 @@
+ /* define if you have CGL OpenGL bindings */
+ /* #undef HAVE_CGL */
+ 
++/* define if you have EGL bindings */
++/* #undef HAVE_EGL */
++
+ /* The CPP compiler has a variable containing the current function name */
+ #define HAVE_CPP_COMPILER_FUNCTION_NAME_VAR __FUNCTION__
+ 
+Index: coin3/build/msvc9/src/config-release.h
+===================================================================
+--- coin3.orig/build/msvc9/src/config-release.h
++++ coin3/build/msvc9/src/config-release.h
+@@ -124,6 +124,9 @@
+ /* define if you have CGL OpenGL bindings */
+ /* #undef HAVE_CGL */
+ 
++/* define if you have EGL bindings */
++/* #undef HAVE_EGL */
++
+ /* The CPP compiler has a variable containing the current function name */
+ #define HAVE_CPP_COMPILER_FUNCTION_NAME_VAR __FUNCTION__
+ 
+Index: coin3/src/config.h.cmake.in
+===================================================================
+--- coin3.orig/src/config.h.cmake.in
++++ coin3/src/config.h.cmake.in
+@@ -121,6 +121,9 @@
+ /* define if you have CGL OpenGL bindings */
+ #cmakedefine HAVE_CGL
+ 
++/* define if you have EGL OpenGL bindings */
++#cmakedefine HAVE_EGL
++
+ /* define if you have the CoreText framework */
+ #cmakedefine HAVE_CORETEXT
+ 
+Index: coin3/src/config.h.in
+===================================================================
+--- coin3.orig/src/config.h.in
++++ coin3/src/config.h.in
+@@ -123,6 +123,9 @@
+ /* define if you have CGL OpenGL bindings */
+ #undef HAVE_CGL
+ 
++/* define if you have EGL OpenGL bindings */
++#undef HAVE_EGL
++
+ /* define if you have the CoreText framework */
+ #undef HAVE_CORETEXT
+ 
+Index: coin3/src/glue/CMakeLists.txt
+===================================================================
+--- coin3.orig/src/glue/CMakeLists.txt
++++ coin3/src/glue/CMakeLists.txt
+@@ -7,6 +7,7 @@ set(COIN_GLUE_FILES
+ 	gl_wgl.cpp
+ 	gl_agl.cpp
+ 	gl_cgl.cpp
++	gl_egl.cpp
+ 	gl_glx.cpp
+ 	GLUWrapper.cpp
+ 	simage_wrapper.cpp
+@@ -29,6 +30,8 @@ set(COIN_GLUE_INTERNAL_FILES
+ 	gl_agl.cpp
+ 	gl_cgl.h
+ 	gl_cgl.cpp
++	gl_egl.h
++	gl_egl.cpp
+ 	gl_glx.h
+ 	gl_glx.cpp
+ 	GLUWrapper.h
+Index: coin3/src/glue/Makefile.am
+===================================================================
+--- coin3.orig/src/glue/Makefile.am
++++ coin3/src/glue/Makefile.am
+@@ -3,7 +3,7 @@ RegularSources = \
+ 	spidermonkey.cpp \
+ 	dl.cpp \
+ 	gl.cpp \
+-	gl_wgl.cpp gl_agl.cpp gl_cgl.cpp gl_glx.cpp \
++	gl_wgl.cpp gl_agl.cpp gl_cgl.cpp gl_egl.cpp gl_glx.cpp \
+ 	GLUWrapper.cpp \
+ 	simage_wrapper.cpp \
+ 	openal_wrapper.cpp \
+@@ -26,6 +26,7 @@ PrivateHeaders = \
+ 	freetype.h \
+ 	gl_agl.h \
+ 	gl_cgl.h \
++	gl_egl.h \
+ 	gl_glx.h \
+ 	gl_wgl.h \
+ 	glp.h \
+Index: coin3/src/glue/Makefile.in
+===================================================================
+--- coin3.orig/src/glue/Makefile.in
++++ coin3/src/glue/Makefile.in
+@@ -57,13 +57,13 @@ ARFLAGS = cru
+ glue_lst_AR = $(AR) $(ARFLAGS)
+ glue_lst_LIBADD =
+ am__glue_lst_SOURCES_DIST = cg.cpp spidermonkey.cpp dl.cpp gl.cpp \
+-	gl_wgl.cpp gl_agl.cpp gl_cgl.cpp gl_glx.cpp GLUWrapper.cpp \
++	gl_wgl.cpp gl_agl.cpp gl_cgl.cpp gl_egl.cpp gl_glx.cpp GLUWrapper.cpp \
+ 	simage_wrapper.cpp openal_wrapper.cpp win32api.cpp zlib.cpp \
+ 	bzip2.cpp freetype.cpp normalization_cubemap.cpp \
+ 	all-glue-cpp.cpp
+ am__objects_1 = cg.$(OBJEXT) spidermonkey.$(OBJEXT) dl.$(OBJEXT) \
+-	gl.$(OBJEXT) gl_wgl.$(OBJEXT) gl_agl.$(OBJEXT) \
+-	gl_cgl.$(OBJEXT) gl_glx.$(OBJEXT) GLUWrapper.$(OBJEXT) \
++	gl.$(OBJEXT) gl_wgl.$(OBJEXT) gl_agl.$(OBJEXT) gl_cgl.$(OBJEXT) \
++	gl_egl.$(OBJEXT) gl_glx.$(OBJEXT) GLUWrapper.$(OBJEXT) \
+ 	simage_wrapper.$(OBJEXT) openal_wrapper.$(OBJEXT) \
+ 	win32api.$(OBJEXT) zlib.$(OBJEXT) bzip2.$(OBJEXT) \
+ 	freetype.$(OBJEXT) normalization_cubemap.$(OBJEXT)
+@@ -72,10 +72,10 @@ am__objects_2 = all-glue-cpp.$(OBJEXT)
+ @HACKING_COMPACT_BUILD_TRUE@am__objects_3 = $(am__objects_2)
+ am_glue_lst_OBJECTS = $(am__objects_3)
+ am__EXTRA_glue_lst_SOURCES_DIST = GLUWrapper.h bzip2.h cg.h dlp.h \
+-	freetype.h gl_agl.h gl_cgl.h gl_glx.h gl_wgl.h glp.h \
++	freetype.h gl_agl.h gl_cgl.h gl_egl.h gl_glx.h gl_wgl.h glp.h \
+ 	openal_wrapper.h simage_wrapper.h win32api.h zlib.h \
+ 	all-glue-cpp.cpp cg.cpp spidermonkey.cpp dl.cpp gl.cpp \
+-	gl_wgl.cpp gl_agl.cpp gl_cgl.cpp gl_glx.cpp GLUWrapper.cpp \
++	gl_wgl.cpp gl_agl.cpp gl_cgl.cpp gl_egl.cpp gl_glx.cpp GLUWrapper.cpp \
+ 	simage_wrapper.cpp openal_wrapper.cpp win32api.cpp zlib.cpp \
+ 	bzip2.cpp freetype.cpp normalization_cubemap.cpp
+ glue_lst_OBJECTS = $(am_glue_lst_OBJECTS)
+@@ -84,12 +84,12 @@ libLTLIBRARIES_INSTALL = $(INSTALL)
+ LTLIBRARIES = $(lib_LTLIBRARIES) $(noinst_LTLIBRARIES)
+ libglue_la_LIBADD =
+ am__libglue_la_SOURCES_DIST = cg.cpp spidermonkey.cpp dl.cpp gl.cpp \
+-	gl_wgl.cpp gl_agl.cpp gl_cgl.cpp gl_glx.cpp GLUWrapper.cpp \
++	gl_wgl.cpp gl_agl.cpp gl_cgl.cpp gl_egl.cpp gl_glx.cpp GLUWrapper.cpp \
+ 	simage_wrapper.cpp openal_wrapper.cpp win32api.cpp zlib.cpp \
+ 	bzip2.cpp freetype.cpp normalization_cubemap.cpp \
+ 	all-glue-cpp.cpp
+ am__objects_6 = cg.lo spidermonkey.lo dl.lo gl.lo gl_wgl.lo gl_agl.lo \
+-	gl_cgl.lo gl_glx.lo GLUWrapper.lo simage_wrapper.lo \
++	gl_cgl.lo gl_egl.lo gl_glx.lo GLUWrapper.lo simage_wrapper.lo \
+ 	openal_wrapper.lo win32api.lo zlib.lo bzip2.lo freetype.lo \
+ 	normalization_cubemap.lo
+ am__objects_7 = all-glue-cpp.lo
+@@ -97,25 +97,25 @@ am__objects_7 = all-glue-cpp.lo
+ @HACKING_COMPACT_BUILD_TRUE@am__objects_8 = $(am__objects_7)
+ am_libglue_la_OBJECTS = $(am__objects_8)
+ am__EXTRA_libglue_la_SOURCES_DIST = GLUWrapper.h bzip2.h cg.h dlp.h \
+-	freetype.h gl_agl.h gl_cgl.h gl_glx.h gl_wgl.h glp.h \
++	freetype.h gl_agl.h gl_cgl.h gl_egl.h gl_glx.h gl_wgl.h glp.h \
+ 	openal_wrapper.h simage_wrapper.h win32api.h zlib.h \
+ 	all-glue-cpp.cpp cg.cpp spidermonkey.cpp dl.cpp gl.cpp \
+-	gl_wgl.cpp gl_agl.cpp gl_cgl.cpp gl_glx.cpp GLUWrapper.cpp \
++	gl_wgl.cpp gl_agl.cpp gl_cgl.cpp gl_egl.cpp gl_glx.cpp GLUWrapper.cpp \
+ 	simage_wrapper.cpp openal_wrapper.cpp win32api.cpp zlib.cpp \
+ 	bzip2.cpp freetype.cpp normalization_cubemap.cpp
+ libglue_la_OBJECTS = $(am_libglue_la_OBJECTS)
+ libglue@SUFFIX@LINKHACK_la_LIBADD =
+ am__libglue@SUFFIX@LINKHACK_la_SOURCES_DIST = cg.cpp spidermonkey.cpp \
+-	dl.cpp gl.cpp gl_wgl.cpp gl_agl.cpp gl_cgl.cpp gl_glx.cpp \
++	dl.cpp gl.cpp gl_wgl.cpp gl_agl.cpp gl_cgl.cpp gl_egl.cpp gl_glx.cpp \
+ 	GLUWrapper.cpp simage_wrapper.cpp openal_wrapper.cpp \
+ 	win32api.cpp zlib.cpp bzip2.cpp freetype.cpp \
+ 	normalization_cubemap.cpp all-glue-cpp.cpp
+ am_libglue@SUFFIX@LINKHACK_la_OBJECTS = $(am__objects_8)
+ am__EXTRA_libglue@SUFFIX@LINKHACK_la_SOURCES_DIST = GLUWrapper.h \
+-	bzip2.h cg.h dlp.h freetype.h gl_agl.h gl_cgl.h gl_glx.h \
++	bzip2.h cg.h dlp.h freetype.h gl_agl.h gl_cgl.h gl_egl.h gl_glx.h \
+ 	gl_wgl.h glp.h openal_wrapper.h simage_wrapper.h win32api.h \
+ 	zlib.h all-glue-cpp.cpp cg.cpp spidermonkey.cpp dl.cpp gl.cpp \
+-	gl_wgl.cpp gl_agl.cpp gl_cgl.cpp gl_glx.cpp GLUWrapper.cpp \
++	gl_wgl.cpp gl_agl.cpp gl_cgl.cpp gl_egl.cpp gl_glx.cpp GLUWrapper.cpp \
+ 	simage_wrapper.cpp openal_wrapper.cpp win32api.cpp zlib.cpp \
+ 	bzip2.cpp freetype.cpp normalization_cubemap.cpp
+ libglue@SUFFIX@LINKHACK_la_OBJECTS =  \
+@@ -132,7 +132,8 @@ am__depfiles_maybe = depfiles
+ @AMDEP_TRUE@	./$(DEPDIR)/freetype.Po ./$(DEPDIR)/gl.Plo \
+ @AMDEP_TRUE@	./$(DEPDIR)/gl.Po ./$(DEPDIR)/gl_agl.Plo \
+ @AMDEP_TRUE@	./$(DEPDIR)/gl_agl.Po ./$(DEPDIR)/gl_cgl.Plo \
+-@AMDEP_TRUE@	./$(DEPDIR)/gl_cgl.Po ./$(DEPDIR)/gl_glx.Plo \
++@AMDEP_TRUE@	./$(DEPDIR)/gl_cgl.Po ./$(DEPDIR)/gl_egl.Plo \
++@AMDEP_TRUE@	./$(DEPDIR)/gl_egl.Po ./$(DEPDIR)/gl_glx.Plo \
+ @AMDEP_TRUE@	./$(DEPDIR)/gl_glx.Po ./$(DEPDIR)/gl_wgl.Plo \
+ @AMDEP_TRUE@	./$(DEPDIR)/gl_wgl.Po \
+ @AMDEP_TRUE@	./$(DEPDIR)/normalization_cubemap.Plo \
+@@ -426,7 +427,7 @@ RegularSources = \
+ 	spidermonkey.cpp \
+ 	dl.cpp \
+ 	gl.cpp \
+-	gl_wgl.cpp gl_agl.cpp gl_cgl.cpp gl_glx.cpp \
++	gl_wgl.cpp gl_agl.cpp gl_cgl.cpp gl_egl.cpp gl_glx.cpp \
+ 	GLUWrapper.cpp \
+ 	simage_wrapper.cpp \
+ 	openal_wrapper.cpp \
+@@ -448,6 +449,7 @@ PrivateHeaders = \
+ 	freetype.h \
+ 	gl_agl.h \
+ 	gl_cgl.h \
++	gl_egl.h \
+ 	gl_glx.h \
+ 	gl_wgl.h \
+ 	glp.h \
+@@ -602,6 +604,8 @@ distclean-compile:
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/gl_agl.Po@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/gl_cgl.Plo@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/gl_cgl.Po@am__quote@
++@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/gl_egl.Plo@am__quote@
++@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/gl_egl.Po@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/gl_glx.Plo@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/gl_glx.Po@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/gl_wgl.Plo@am__quote@
+Index: coin3/src/glue/gl.cpp
+===================================================================
+--- coin3.orig/src/glue/gl.cpp
++++ coin3/src/glue/gl.cpp
+@@ -196,8 +196,12 @@
+    is either fiddling manually with config.h, or in case a change is
+    made which breaks this protection in the configure script. */
+ 
+-#if defined(HAVE_WGL) && (defined(HAVE_GLX) || defined(HAVE_AGL) || defined(HAVE_CGL))
+-#error More than one of HAVE_WGL, HAVE_GLX and HAVE_AGL|HAVE_CGL set simultaneously!
++#if defined(HAVE_WGL) && (defined(HAVE_EGL) || defined(HAVE_GLX) || defined(HAVE_AGL) || defined(HAVE_CGL))
++#error More than one of HAVE_WGL, HAVE_GLX , HAVE_EGL, and HAVE_AGL|HAVE_CGL set simultaneously!
++#endif
++
++#if defined(HAVE_EGL) && (defined(HAVE_GLX) || defined(HAVE_AGL) || defined(HAVE_CGL))
++#error More than one of HAVE_WGL, HAVE_GLX, HAVE_EGL and HAVE_AGL|HAVE_CGL set simultaneously!
+ #endif
+ 
+ #if defined(HAVE_GLX) && (defined(HAVE_AGL) || defined(HAVE_CGL))
+@@ -205,7 +209,7 @@
+ #endif
+ 
+ // Define HAVE_NOGL if no platform GL binding exists
+-#if !defined(HAVE_WGL) && !defined(HAVE_GLX) && !(defined(HAVE_AGL) || defined(HAVE_CGL))
++#if !defined(HAVE_WGL) && !defined(HAVE_GLX) && !defined(HAVE_EGL) && !(defined(HAVE_AGL) || defined(HAVE_CGL))
+ #define HAVE_NOGL 1
+ #endif
+ 
+@@ -232,6 +236,11 @@
+ #include <GL/glx.h>
+ #endif /* HAVE_GLX */
+ 
++#ifdef HAVE_EGL
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
++#endif /* HAVE_EGL */
++
+ #include <Inventor/C/glue/gl.h>
+ 
+ #include <Inventor/C/errors/debugerror.h>
+@@ -247,6 +256,7 @@
+ #include "glue/dlp.h"
+ #include "glue/gl_agl.h"
+ #include "glue/gl_cgl.h"
++#include "glue/gl_egl.h"
+ #include "glue/gl_glx.h"
+ #include "glue/gl_wgl.h"
+ #include "threads/threadsutilp.h"
+@@ -584,6 +594,9 @@ cc_glglue_getprocaddress(const cc_glglue
+   ptr = coin_wgl_getprocaddress(glue, symname);
+   if (ptr) goto returnpoint;
+ 
++  ptr = eglglue_getprocaddress(glue, symname);
++  if (ptr) goto returnpoint;
++
+   ptr = glxglue_getprocaddress(glue, symname);
+   if (ptr) goto returnpoint;
+ 
+@@ -622,6 +635,8 @@ glglue_cleanup(void)
+ 
+ #ifdef HAVE_GLX
+   glxglue_cleanup();
++#elif defined(HAVE_EGL)
++  eglglue_cleanup();
+ #elif defined(HAVE_WGL)
+   wglglue_cleanup();
+ #else
+@@ -2280,7 +2295,11 @@ cc_glglue_instance(int contextid)
+     assert(glGetError() == GL_NO_ERROR && "GL error when calling glGetString() -- no current GL context?");
+ 
+     glglue_set_glVersion(gi);
++#ifdef HAVE_GLX
+     glxglue_init(gi);
++#elif defined(HAVE_EGL)
++    eglglue_init(gi);
++#endif
+ 
+     gi->vendorstr = (const char *)glGetString(GL_VENDOR);
+     gi->vendor_is_SGI = strcmp((const char *)gi->vendorstr, "SGI") == 0;
+@@ -4389,6 +4408,8 @@ cc_glglue_context_create_offscreen(unsig
+   return NULL;
+ #elif defined(HAVE_GLX)
+   return glxglue_context_create_offscreen(width, height);
++#elif defined(HAVE_EGL)
++  return eglglue_context_create_offscreen(width, height);
+ #elif defined(HAVE_WGL)
+   return wglglue_context_create_offscreen(width, height);
+ #else
+@@ -4417,6 +4438,8 @@ cc_glglue_context_make_current(void * ct
+   return FALSE;
+ #elif defined(HAVE_GLX)
+   return glxglue_context_make_current(ctx);
++#elif defined(HAVE_EGL)
++  return eglglue_context_make_current(ctx);
+ #elif defined(HAVE_WGL)
+   return wglglue_context_make_current(ctx);
+ #else
+@@ -4455,6 +4478,8 @@ cc_glglue_context_reinstate_previous(voi
+   assert(FALSE && "unimplemented");
+ #elif defined(HAVE_GLX)
+   glxglue_context_reinstate_previous(ctx);
++#elif defined(HAVE_EGL)
++  eglglue_context_reinstate_previous(ctx);
+ #elif defined(HAVE_WGL)
+   wglglue_context_reinstate_previous(ctx);
+ #else
+@@ -4480,6 +4505,8 @@ cc_glglue_context_destruct(void * ctx)
+   assert(FALSE && "unimplemented");
+ #elif defined(HAVE_GLX)
+   glxglue_context_destruct(ctx);
++#elif defined(HAVE_EGL)
++  eglglue_context_destruct(ctx);
+ #elif defined(HAVE_WGL)
+   wglglue_context_destruct(ctx);
+ #else
+@@ -4603,6 +4630,8 @@ cc_glglue_context_max_dimensions(unsigne
+     ok = wglglue_context_pbuffer_max(ctx, pbufmax);
+ #elif defined(HAVE_GLX)
+     ok = glxglue_context_pbuffer_max(ctx, pbufmax);
++#elif defined(HAVE_EGL)
++    ok = eglglue_context_pbuffer_max(ctx, pbufmax);
+ #elif defined(HAVE_AGL) || defined(HAVE_CGL)
+     /* FIXME: implement check on max pbuffer width, height and number
+        of pixels for AGL/CGL, if any such limits are imposed there.
+@@ -4682,6 +4711,8 @@ cc_glglue_context_can_render_to_texture(
+ 
+ #if defined(HAVE_GLX) || defined(HAVE_NOGL)
+   return FALSE;
++#elif defined(HAVE_EGL)
++  return eglglue_context_can_render_to_texture(ctx);
+ #elif defined(HAVE_WGL)
+   return wglglue_context_can_render_to_texture(ctx);
+ #else
+@@ -4709,6 +4740,8 @@ cc_glglue_context_bind_pbuffer(void * CO
+      equivalent to the aglTexImagePBuffer() and wglBindTexImageARB()
+      calls).  kyrah 20031123. */
+   assert(FALSE && "unimplemented");
++#elif defined(HAVE_EGL)
++  eglglue_context_bind_pbuffer(ctx);
+ #elif defined(HAVE_WGL)
+   wglglue_context_bind_pbuffer(ctx);
+ #else
+@@ -4732,6 +4765,8 @@ cc_glglue_context_release_pbuffer(void *
+ #if defined(HAVE_GLX) || defined(HAVE_NOGL)
+   /* FIXME: Implement for GLX. kyrah 20031123. */
+   assert(FALSE && "unimplemented");
++#elif defined(HAVE_EGL)
++  eglglue_context_release_pbuffer(ctx);
+ #elif defined(HAVE_WGL)
+   wglglue_context_release_pbuffer(ctx);
+ #else
+@@ -4756,6 +4791,8 @@ cc_glglue_context_pbuffer_is_bound(void
+   /* FIXME: Implement for GLX. kyrah 20031123. */
+   assert(FALSE && "unimplemented");
+   return FALSE;
++#elif defined(HAVE_EGL)
++  return eglglue_context_pbuffer_is_bound(ctx);
+ #elif defined(HAVE_WGL)
+   return wglglue_context_pbuffer_is_bound(ctx);
+ #else
+@@ -5107,6 +5144,10 @@ coin_gl_current_context(void)
+   ctx = glXGetCurrentContext();
+ #endif /* HAVE_GLX */
+ 
++#ifdef HAVE_EGL
++  ctx = eglGetCurrentContext();
++#endif /* HAVE_EGL */
++
+ #ifdef HAVE_WGL
+   ctx = wglGetCurrentContext();
+ #endif /* HAVE_WGL */
+Index: coin3/src/glue/gl_egl.cpp
+===================================================================
+--- /dev/null
++++ coin3/src/glue/gl_egl.cpp
+@@ -0,0 +1,488 @@
++/**************************************************************************\
++ * Copyright (c) Kongsberg Oil & Gas Technologies AS
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are
++ * met:
++ *
++ * Redistributions of source code must retain the above copyright notice,
++ * this list of conditions and the following disclaimer.
++ *
++ * Redistributions in binary form must reproduce the above copyright
++ * notice, this list of conditions and the following disclaimer in the
++ * documentation and/or other materials provided with the distribution.
++ *
++ * Neither the name of the copyright holder nor the names of its
++ * contributors may be used to endorse or promote products derived from
++ * this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++ * HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++\**************************************************************************/
++
++/*
++ *  Environment variable controls available:
++ * 
++ *   - COIN_EGLGLUE_NO_PBUFFERS: set to 1 to force software rendering of
++ *     offscreen contexts.
++ */
++
++#include "glue/gl_egl.h"
++#include "coindefs.h"
++
++#ifdef HAVE_CONFIG_H
++#include "config.h"
++#endif /* HAVE_CONFIG_H */
++
++#include <cstdlib>
++#include <cstring>
++#include <cassert>
++
++#include <Inventor/C/tidbits.h>
++#include <Inventor/C/glue/gl.h>
++#include <Inventor/C/errors/debugerror.h>
++#include <Inventor/C/glue/dl.h>
++
++#include "glue/glp.h"
++#include "glue/dlp.h"
++
++/* ********************************************************************** */
++
++#ifndef HAVE_EGL
++
++void * eglglue_getprocaddress(const cc_glglue * glue_in, const char * fname)
++{
++  return NULL;
++}
++
++void * eglglue_context_create_offscreen(unsigned int COIN_UNUSED_ARG(width),
++                                        unsigned int COIN_UNUSED_ARG(height)) {
++  assert(FALSE); return NULL;
++}
++
++SbBool eglglue_context_make_current(void * COIN_UNUSED_ARG(ctx))
++{
++  assert(FALSE); return FALSE;
++}
++
++void eglglue_context_reinstate_previous(void * COIN_UNUSED_ARG(ctx))
++{
++  assert(FALSE);
++}
++
++void eglglue_context_destruct(void * COIN_UNUSED_ARG(ctx))
++{
++  assert(FALSE);
++}
++
++SbBool eglglue_context_pbuffer_max(void * ctx, unsigned int * lims)
++{
++  assert(FALSE); return FALSE;
++}
++
++#else /* HAVE_EGL */
++
++/* ********************************************************************** */
++
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
++
++EGLDisplay eglglue_display = EGL_NO_DISPLAY;
++struct eglglue_contextdata;
++
++#define CASE_STR( value ) case value: return #value;
++const char* eglErrorString( EGLint error )
++{
++    switch( error )
++    {
++    CASE_STR( EGL_SUCCESS             )
++    CASE_STR( EGL_NOT_INITIALIZED     )
++    CASE_STR( EGL_BAD_ACCESS          )
++    CASE_STR( EGL_BAD_ALLOC           )
++    CASE_STR( EGL_BAD_ATTRIBUTE       )
++    CASE_STR( EGL_BAD_CONTEXT         )
++    CASE_STR( EGL_BAD_CONFIG          )
++    CASE_STR( EGL_BAD_CURRENT_SURFACE )
++    CASE_STR( EGL_BAD_DISPLAY         )
++    CASE_STR( EGL_BAD_SURFACE         )
++    CASE_STR( EGL_BAD_MATCH           )
++    CASE_STR( EGL_BAD_PARAMETER       )
++    CASE_STR( EGL_BAD_NATIVE_PIXMAP   )
++    CASE_STR( EGL_BAD_NATIVE_WINDOW   )
++    CASE_STR( EGL_CONTEXT_LOST        )
++    default: return "Unknown";
++    }
++}
++const char* eglAPIString( EGLenum api )
++{
++    switch( api )
++    {
++    CASE_STR( EGL_OPENGL_API          )
++    CASE_STR( EGL_OPENGL_ES_API          )
++    CASE_STR( EGL_OPENVG_API          )
++    default: return "Unknown";
++    }
++}
++#undef CASE_STR
++
++struct eglglue_contextdata {
++  EGLContext context;
++  EGLSurface surface;
++  EGLContext storedcontext;
++  EGLSurface storedsurface;
++  unsigned int width;
++  unsigned int height;
++};
++
++static struct eglglue_contextdata *
++eglglue_contextdata_init(unsigned int width, unsigned int height)
++{
++  struct eglglue_contextdata * ctx;
++  ctx = (struct eglglue_contextdata *)malloc(sizeof(struct eglglue_contextdata));
++
++  ctx->context = EGL_NO_CONTEXT;
++  ctx->surface = EGL_NO_SURFACE;
++  ctx->storedcontext = EGL_NO_CONTEXT;
++  ctx->storedsurface = EGL_NO_SURFACE;
++  ctx->width = width;
++  ctx->height = height;
++  return ctx;
++}
++
++static EGLDisplay
++eglglue_get_display(void)
++{
++  if (eglglue_display == EGL_NO_DISPLAY) {
++      eglglue_display = eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, EGL_DEFAULT_DISPLAY, NULL);
++      if (eglglue_display == EGL_NO_DISPLAY) {
++        cc_debugerror_post("eglglue_get_display",
++                           "Display not found.");
++        return EGL_NO_DISPLAY;
++      }
++    if (coin_glglue_debug()) {
++      cc_debugerror_postinfo("eglglue_get_display",
++                             "got EGLDisplay==%p",
++                             eglglue_display);
++    }
++  }
++  return eglglue_display;
++}
++
++void
++eglglue_init(cc_glglue * w)
++{
++  w->glx.isdirect = 1;
++  w->glx.serverversion = NULL;
++  w->glx.servervendor = NULL;
++  w->glx.serverextensions = NULL;
++  w->glx.clientversion = NULL;
++  w->glx.clientvendor = NULL;
++  w->glx.clientextensions = NULL;
++  w->glx.glxextensions = NULL;
++
++  w->glx.glXGetCurrentDisplay = (COIN_PFNGLXGETCURRENTDISPLAYPROC)eglglue_getprocaddress(w, "eglglue_get_display");
++
++  if (eglInitialize(eglglue_get_display(), &w->glx.version.major, &w->glx.version.minor) == EGL_FALSE) {
++    cc_debugerror_post("eglglue_init",
++                       "Couldn't initialize EGL. %s",
++                        eglErrorString(eglGetError()));
++    return;
++  }
++
++  if (eglBindAPI(EGL_OPENGL_API) == EGL_FALSE) {
++    cc_debugerror_post("eglglue_init",
++                       "eglBindAPI(EGL_OPENGL_API) failed. %s",
++                       eglErrorString(eglGetError()));
++    return;
++  }
++
++  if (coin_glglue_debug()) {
++    cc_debugerror_postinfo("eglglue_init",
++                           "EGL version: %d.%d",
++                            w->glx.version.major,
++                            w->glx.version.minor);
++    cc_debugerror_postinfo("eglglue_init",
++                           "eglQueryString(EGL_VERSION)=='%s'",
++                            eglQueryString(eglglue_get_display(), EGL_VERSION));
++    cc_debugerror_postinfo("eglglue_init",
++                           "eglQueryString(EGL_VENDOR)=='%s'",
++                            eglQueryString(eglglue_get_display(), EGL_VENDOR));
++    cc_debugerror_postinfo("eglglue_init",
++                           "eglQueryString(EGL_CLIENT_APIS)=='%s'",
++                            eglQueryString(eglglue_get_display(), EGL_CLIENT_APIS));
++    cc_debugerror_postinfo("eglglue_init",
++                           "eglQueryAPI()=='%s'",
++                           eglAPIString(eglQueryAPI()));
++    cc_debugerror_postinfo("eglglue_init",
++                           "eglQueryString(EGL_EXTENSIONS)=='%s'",
++                            eglQueryString(eglglue_get_display(), EGL_EXTENSIONS));
++  }
++}
++
++static void
++eglglue_contextdata_cleanup(struct eglglue_contextdata * ctx)
++{
++  if (ctx == NULL) { return; }
++  if (eglglue_get_display() != EGL_NO_DISPLAY && ctx->context != EGL_NO_CONTEXT) eglDestroyContext(eglglue_get_display(), ctx->context);
++  if (eglglue_get_display() != EGL_NO_DISPLAY && ctx->surface != EGL_NO_SURFACE) eglDestroySurface(eglglue_get_display(), ctx->surface);
++  if (eglglue_get_display() != EGL_NO_DISPLAY && ctx->storedcontext != EGL_NO_CONTEXT) eglDestroyContext(eglglue_get_display(), ctx->storedcontext);
++  if (eglglue_get_display() != EGL_NO_DISPLAY && ctx->storedsurface != EGL_NO_SURFACE) eglDestroySurface(eglglue_get_display(), ctx->storedsurface);
++  free(ctx);
++}
++
++void *
++eglglue_context_create_offscreen(unsigned int width, unsigned int height)
++{
++  struct eglglue_contextdata * ctx;
++  EGLint format;
++  EGLint numConfigs;
++  EGLConfig config;
++  EGLint attrib[] = {
++    EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
++    EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
++    EGL_RED_SIZE, 8,
++    EGL_GREEN_SIZE, 8,
++    EGL_BLUE_SIZE, 8,
++    EGL_ALPHA_SIZE, 8,
++    EGL_DEPTH_SIZE, 24,
++    EGL_STENCIL_SIZE, 1,
++    EGL_NONE
++  };
++
++  EGLAttrib surface_attrib[] = {
++    EGL_TEXTURE_FORMAT, EGL_TEXTURE_RGBA,
++    EGL_TEXTURE_TARGET, EGL_TEXTURE_2D,
++    EGL_WIDTH, (EGLint) ctx->width,
++    EGL_HEIGHT, (EGLint) ctx->height,
++    EGL_NONE
++  };
++
++  ctx = eglglue_contextdata_init(width, height);
++  if (!ctx) return NULL;
++
++  const int v = coin_glglue_stencil_bits_hack();
++  if (v != -1) {
++    attrib[15] = v;
++  }
++
++  if (coin_glglue_debug()) {
++    cc_debugerror_postinfo("eglglue_context_create_offscreen",
++                           "Creating offscreen context.");
++  }
++
++  if (eglBindAPI(EGL_OPENGL_API) == EGL_FALSE) {
++    cc_debugerror_post("eglglue_context_create_offscreen",
++                       "eglBindAPI(EGL_OPENGL_API) failed. %s",
++                       eglErrorString(eglGetError()));
++    return NULL;
++  }
++
++  const char * env = coin_getenv("COIN_EGLGLUE_NO_PBUFFERS");
++  if (env && atoi(env) > 0) {
++    attrib[3] = EGL_PIXMAP_BIT;
++    if (coin_glglue_debug()) {
++      cc_debugerror_postinfo("eglglue_context_create_offscreen",
++                             "Force software rendering.");
++    }
++  }
++
++  eglChooseConfig(eglglue_get_display(), attrib, &config, 1, &numConfigs);
++  if (numConfigs == 0) {
++    if (attrib[3] == EGL_PBUFFER_BIT) {
++      if (coin_glglue_debug()) {
++        cc_debugerror_postinfo("eglglue_context_create_offscreen",
++                               "PBuffer offscreen rendering is NOT supported "
++                               "by the OpenGL driver. Try software rendering.");
++      }
++      attrib[3] = EGL_PIXMAP_BIT;
++      eglChooseConfig(eglglue_get_display(), attrib, &config, 1, &numConfigs);
++    }
++  }
++  if (numConfigs == 0) {
++    cc_debugerror_post("eglglue_context_create_offscreen",
++                       "No matching EGL config. %s",
++                       eglErrorString(eglGetError()));
++    eglglue_contextdata_cleanup(ctx);
++    return NULL;
++  }
++
++  if (attrib[3] == EGL_PBUFFER_BIT) {
++    ctx->surface = eglCreatePlatformWindowSurface(eglglue_get_display(), config, 0, surface_attrib);
++  } else {
++    ctx->surface = eglCreatePlatformPixmapSurface(eglglue_get_display(), config, 0, surface_attrib);
++  }
++  if (ctx->surface == EGL_NO_SURFACE) {
++    cc_debugerror_post("eglglue_context_create_offscreen",
++                       "Couldn't create EGL surface. %s",
++                       eglErrorString(eglGetError()));
++    eglglue_contextdata_cleanup(ctx);
++    return NULL;
++  }
++
++  ctx->context = eglCreateContext(eglglue_get_display(), config, EGL_NO_CONTEXT, NULL);
++
++  if (ctx->context == EGL_NO_CONTEXT) {
++    cc_debugerror_post("eglglue_context_create_offscreen",
++                       "Couldn't create EGL context. %s",
++                       eglErrorString(eglGetError()));
++    eglglue_contextdata_cleanup(ctx);
++    return NULL;
++  }
++
++  if (coin_glglue_debug()) {
++    cc_debugerror_postinfo("eglglue_context_create_offscreen",
++                           "created new %s offscreen context == %p",
++                           attrib[3] == EGL_PBUFFER_BIT ? "pBuffer" : "software",
++                           ctx->context);
++  }
++  return ctx;
++}
++
++SbBool
++eglglue_context_make_current(void * ctx)
++{
++  struct eglglue_contextdata * context = (struct eglglue_contextdata *)ctx;
++
++  context->storedcontext = eglGetCurrentContext();
++  context->storedsurface = eglGetCurrentSurface(EGL_DRAW);
++  if (eglMakeCurrent(eglglue_get_display(), context->surface, context->surface, context->context) == EGL_FALSE) {
++      cc_debugerror_post("eglglue_context_make_current",
++                         "eglMakeCurrent failed: %s",
++                         eglErrorString(eglGetError()));
++      return FALSE;
++  }
++
++  if (coin_glglue_debug()) {
++      cc_debugerror_postinfo("eglglue_context_make_current",
++                             "EGL Context (0x%X)\n",
++                             context->context);
++  }
++  return TRUE;
++}
++
++void
++eglglue_context_reinstate_previous(void * ctx)
++{
++  struct eglglue_contextdata * context = (struct eglglue_contextdata *)ctx;
++
++  if (context->storedcontext != EGL_NO_CONTEXT && context->storedsurface != EGL_NO_SURFACE) {
++    if (eglMakeCurrent(eglglue_get_display(), context->storedsurface, context->storedsurface, context->storedcontext) == EGL_TRUE) {
++      if (coin_glglue_debug()) {
++        cc_debugerror_postinfo("eglglue_context_make_current",
++                               "EGL Context (0x%X)\n",
++                               context->context);
++      }
++    } else {
++      cc_debugerror_post("eglglue_context_make_current",
++                         "eglMakeCurrent failed: %s",
++                         eglErrorString(eglGetError()));
++    }
++  }
++}
++
++void
++eglglue_context_destruct(void * ctx)
++{
++  struct eglglue_contextdata * context = (struct eglglue_contextdata *)ctx;
++
++  if (coin_glglue_debug()) {
++    cc_debugerror_postinfo("eglglue_context_destruct",
++                           "Destroying context %p", context->context);
++  }
++  eglglue_contextdata_cleanup(context);
++}
++
++void
++eglglue_context_bind_pbuffer(void * ctx)
++{
++  struct eglglue_contextdata * context = (struct eglglue_contextdata *)ctx;
++
++  if (eglBindTexImage(eglglue_get_display(), context->surface, EGL_BACK_BUFFER) == EGL_FALSE) {
++    cc_debugerror_post("eglglue_context_bind_pbuffer()"
++                       "after binding pbuffer: %s",
++                       eglErrorString(eglGetError()));
++  }
++}
++
++void
++eglglue_context_release_pbuffer(void * ctx)
++{
++  struct eglglue_contextdata * context = (struct eglglue_contextdata *)ctx;
++
++  if (eglReleaseTexImage(eglglue_get_display(), context->surface, EGL_BACK_BUFFER) == EGL_FALSE) {
++    cc_debugerror_post("eglglue_context_release_pbuffer()"
++                       "releasing pbuffer: %s",
++                       eglErrorString(eglGetError()));
++  }
++}
++
++SbBool
++eglglue_context_pbuffer_is_bound(void * ctx)
++{
++  struct eglglue_contextdata * context = (struct eglglue_contextdata *)ctx;
++  GLint buffer = EGL_NONE;
++
++  if(eglQueryContext(eglglue_get_display(), context->context, EGL_RENDER_BUFFER, &buffer) == EGL_FALSE) {
++    cc_debugerror_post("eglglue_context_pbuffer_is_bound()"
++                       "after query pbuffer: %s",
++                       eglErrorString(eglGetError()));
++  }
++  return buffer == EGL_BACK_BUFFER;
++}
++
++SbBool
++eglglue_context_can_render_to_texture(void * ctx)
++{
++  struct eglglue_contextdata * context = (struct eglglue_contextdata *)ctx;
++  return context->surface != EGL_NO_SURFACE;
++}
++
++SbBool
++eglglue_context_pbuffer_max(void * ctx, unsigned int * lims)
++{
++  int returnval, attribval, i;
++  const int attribs[] = {
++    EGL_MAX_PBUFFER_WIDTH, EGL_MAX_PBUFFER_HEIGHT, EGL_MAX_PBUFFER_PIXELS
++  };
++  struct eglglue_contextdata * context = (struct eglglue_contextdata *)ctx;
++
++  if (context->surface == EGL_NO_SURFACE) { return FALSE; }
++
++  for (i = 0; i < 3; i++) {
++    if(eglQuerySurface(eglglue_get_display(), context->surface, attribs[i], &attribval) == EGL_FALSE) {
++      cc_debugerror_post("eglglue_context_pbuffer_max",
++                         "eglQuerySurface() failed, "
++                         "returned error code %s",
++                         eglErrorString(eglGetError()));
++      return FALSE;
++    }
++    assert(attribval >= 0);
++    lims[i] = (unsigned int)attribval;
++  }
++  return TRUE;
++}
++
++void *
++eglglue_getprocaddress(const cc_glglue * glue_in, const char * fname)
++{
++  return (void *)eglGetProcAddress(fname);
++}
++
++void
++eglglue_cleanup(void)
++{
++  if (eglglue_display != EGL_NO_DISPLAY) eglTerminate(eglglue_display);
++  eglglue_display = EGL_NO_DISPLAY;
++}
++
++#endif /* HAVE_EGL */
+Index: coin3/src/glue/gl_egl.h
+===================================================================
+--- /dev/null
++++ coin3/src/glue/gl_egl.h
+@@ -0,0 +1,64 @@
++#ifndef COIN_GLUE_INTERNAL_EGL_H
++#define COIN_GLUE_INTERNAL_EGL_H
++
++/**************************************************************************\
++ * Copyright (c) Kongsberg Oil & Gas Technologies AS
++ * All rights reserved.
++ * 
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are
++ * met:
++ * 
++ * Redistributions of source code must retain the above copyright notice,
++ * this list of conditions and the following disclaimer.
++ * 
++ * Redistributions in binary form must reproduce the above copyright
++ * notice, this list of conditions and the following disclaimer in the
++ * documentation and/or other materials provided with the distribution.
++ * 
++ * Neither the name of the copyright holder nor the names of its
++ * contributors may be used to endorse or promote products derived from
++ * this software without specific prior written permission.
++ * 
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++ * HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++\**************************************************************************/
++
++#ifndef COIN_INTERNAL
++#error this is a private header file
++#endif
++
++#include <Inventor/C/glue/gl.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif /* __cplusplus */
++
++void eglglue_init(cc_glglue * w);
++
++void * eglglue_getprocaddress(const cc_glglue * w, const char * fname);
++void * eglglue_context_create_offscreen(unsigned int width,
++                                        unsigned int height);
++SbBool eglglue_context_make_current(void * ctx);
++void eglglue_context_reinstate_previous(void * ctx);
++void eglglue_context_destruct(void * ctx);
++void eglglue_context_bind_pbuffer(void * ctx);
++void eglglue_context_release_pbuffer(void * ctx);
++SbBool eglglue_context_pbuffer_is_bound(void * ctx);
++SbBool eglglue_context_can_render_to_texture(void * ctx);
++SbBool eglglue_context_pbuffer_max(void * ctx, unsigned int * lims);
++void eglglue_cleanup(void);
++#ifdef __cplusplus
++}
++#endif /* __cplusplus */
++
++#endif /* !COIN_GLUE_INTERNAL_EGL_H */
+Index: coin3/src/glue/all-glue-cpp.cpp
+===================================================================
+--- coin3.orig/src/glue/all-glue-cpp.cpp
++++ coin3/src/glue/all-glue-cpp.cpp
+@@ -35,6 +35,7 @@
+ #include "gl_glx.cpp"
+ #include "gl_agl.cpp"
+ #include "gl_cgl.cpp"
++#include "gl_egl.cpp"
+ 
+ #include "cg.cpp"
+ #include "spidermonkey.cpp"
+Index: coin3/src/discard.h.in
+===================================================================
+--- coin3.orig/src/discard.h.in
++++ coin3/src/discard.h.in
+@@ -402,6 +402,9 @@
+ /* define if vsnprintf() is available */
+ #undef HAVE_VSNPRINTF
+ 
++/* define if you have EGL OpenGL bindings */
++#undef HAVE_EGL
++
+ /* define if you have WGL Win32 OpenGL bindings */
+ #undef HAVE_WGL
+ 
+Index: coin3/src/rendering/SoOffscreenRenderer.cpp
+===================================================================
+--- coin3.orig/src/rendering/SoOffscreenRenderer.cpp
++++ coin3/src/rendering/SoOffscreenRenderer.cpp
+@@ -1764,6 +1764,8 @@ SoOffscreenRendererP::offscreenContextsN
+ 
+ #ifdef HAVE_GLX
+   return FALSE;
++#elif defined(HAVE_EGL)
++  return FALSE;
+ #elif defined(HAVE_WGL)
+   return FALSE;
+ #elif defined(COIN_MACOS_10)
