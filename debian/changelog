@@ -1,3 +1,9 @@
+coin3 (4.0.3+ds-2deepin1) unstable; urgency=medium
+
+  * strip t64
+
+ -- Cryolitia <cryolitia@deepin.org>  Thu, 12 Jun 2025 11:25:15 +0800
+
 coin3 (4.0.3+ds-2) unstable; urgency=medium
 
   * Team upload.
